@@ -8,6 +8,7 @@ import net
 import ujson
 import ntptime
 import dataCall
+import uos
 import request
 from misc import Power
 from gnss import GnssGetData
@@ -95,81 +96,106 @@ def mcu_ota_thread(download_url):
     global is_mcu_ota_active, ota_ready_event
     is_mcu_ota_active = True
     firmware_path = '/usr/app_update.bin'
-    print("Starting MCU OTA download from:", download_url)
+    max_attempts = 3
 
-    try:
-        response = request.get(download_url)
-        with open(firmware_path, 'wb') as f:
-            
-            # Fetch whatever data object the response holds
-            data_source = getattr(response, 'content', getattr(response, 'text', b""))
-            
-            # If it's a simple string or byte object, put it in a list to loop it once
-            if type(data_source) in (str, bytes):
-                data_source = [data_source]
+    for attempt in range(1, max_attempts + 1):
+        print("OTA Attempt {}/{} from: {}".format(attempt, max_attempts, download_url))
+        
+        # 1. Ensure a clean slate by deleting any leftover corrupted files
+        try:
+            uos.remove(firmware_path)
+        except Exception:
+            pass
+
+        try:
+            response = request.get(download_url)
+            if response.status_code != 200:
+                print("HTTP Error", response.status_code, "- Check if GitHub repo is Private!")
+                break # Do not retry 404/403 errors
                 
-            # Iterate through the data chunks
-            for chunk in data_source:
-                try:
-                    # 1. Try writing directly (Works for normal bytes/bytearrays)
-                    f.write(chunk)
-                except Exception:
-                    # 2. If it complains about buffer protocol, it's likely a string-like object
-                    try:
-                        f.write(chunk.encode('latin-1'))
+            with open(firmware_path, 'wb') as f:
+                data_source = getattr(response, 'content', getattr(response, 'text', b""))
+                if type(data_source) in (str, bytes):
+                    data_source = [data_source]
+                for chunk in data_source:
+                    try: f.write(chunk)
                     except Exception:
-                        # 3. Absolute fallback: forcefully cast whatever it is to raw bytes
-                        f.write(bytes(chunk))
-                        
-        print("Firmware downloaded successfully.")
-    except Exception as e:
-        print("Firmware download failed:", e)
-        is_mcu_ota_active = False
-        return
-
-    # ... (Keep the rest of your OTA thread logic starting from "ota_ready_event = 0")
-    ota_ready_event = 0
-    uart.write(b"OTA_START")
-    print("Sent OTA_START to MCU")
-    
-    timeout = 30
-    while ota_ready_event == 0 and timeout > 0:
-        utime.sleep(1)
-        timeout -= 1
-        
-    if ota_ready_event != 1:
-        print("MCU did not respond with READY after reset")
-        is_mcu_ota_active = False
-        return
-        
-    print("MCU ready. Starting chunk transfer.")
-    try:
-        with open(firmware_path, 'rb') as f:
-            while True:
-                chunk = f.read(512)
-                if not chunk:
-                    print("OTA Transfer Complete.")
-                    break
-                if len(chunk) < 512:
-                    chunk += b'\xFF' * (512 - len(chunk))
-
-                ota_ready_event = 0
-                uart.write(chunk)
+                        try: f.write(chunk.encode('latin-1'))
+                        except Exception: f.write(bytes(chunk))
+            
+            f_size = uos.stat(firmware_path)[6]
+            print("Downloaded firmware size:", f_size, "bytes")
+            
+            if f_size < 5000:
+                print("Error: File too small! Aborting.")
+                break # Do not retry if the file itself is fundamentally wrong
                 
-                chunk_timeout = 10
-                while ota_ready_event == 0 and chunk_timeout > 0:
-                    utime.sleep(0.5)
-                    chunk_timeout -= 0.5
-                    
-                if ota_ready_event == -1:
-                    print("MCU reported FLASH_FAIL")
-                    break
-                elif ota_ready_event == 0:
-                    print("Timeout waiting for chunk READY")
-                    break
-    except Exception as e:
-        print("Error during OTA transfer:", e)
+        except Exception as e:
+            print("Download failed:", type(e).__name__, str(e))
+            utime.sleep(3)
+            continue # Loop around and redownload
+
+        # 2. Handshake with STM32
+        ota_ready_event = 0
+        uart.write(b"OTA_START")
+        print("Sent OTA_START to MCU")
         
+        timeout = 30
+        while ota_ready_event == 0 and timeout > 0:
+            utime.sleep(1)
+            timeout -= 1
+            
+        if ota_ready_event != 1:
+            print("MCU did not respond with READY after reset.")
+            utime.sleep(3)
+            continue # Retry the whole process
+
+        # 3. Stream to MCU
+        transfer_success = False
+        print("MCU ready. Starting chunk transfer.")
+        try:
+            with open(firmware_path, 'rb') as f:
+                while True:
+                    chunk = f.read(512)
+                    if not chunk:
+                        print("OTA Transfer Complete.")
+                        transfer_success = True
+                        break
+                    if len(chunk) < 512:
+                        chunk += b'\xFF' * (512 - len(chunk))
+
+                    ota_ready_event = 0
+                    uart.write(chunk)
+                    
+                    chunk_timeout = 10
+                    while ota_ready_event == 0 and chunk_timeout > 0:
+                        utime.sleep(0.5)
+                        chunk_timeout -= 0.5
+                        
+                    if ota_ready_event == -1:
+                        print("MCU reported FLASH_FAIL")
+                        break
+                    elif ota_ready_event == 0:
+                        print("Timeout waiting for chunk READY")
+                        break
+        except Exception as e:
+            print("Error during OTA transfer:", type(e).__name__, str(e))
+            
+        # 4. Cleanup the file from the EC600 memory immediately 
+        try:
+            uos.remove(firmware_path)
+            print("Deleted local .bin file to free memory.")
+        except Exception:
+            pass
+            
+        # 5. Evaluate Success
+        if transfer_success:
+            break # Exit the retry loop!
+        else:
+            print("OTA failed this attempt. Retrying...")
+            utime.sleep(5)
+            # Loop restarts, downloading a fresh copy of the file
+
     is_mcu_ota_active = False
     print("Exiting OTA mode, resuming normal UART.")
 def ec600_ota_thread(download_url):
