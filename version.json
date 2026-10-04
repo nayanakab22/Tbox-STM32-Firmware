@@ -1,4 +1,7 @@
 {
-  "version": "5.0",
-  "url": "https://raw.githubusercontent.com/nayanakab22/Tbox-STM32-Firmware/main/firmware.bin"
+"version": "4.0",
+  "url": "https://raw.githubusercontent.com/nayanakab22/Tbox-STM32-Firmware/main/Tbox_EC600_SLM.bin",
+  "ec_version": "1.0",
+  "ec_url": "https://raw.githubusercontent.com/nayanakab22/Tbox-STM32-Firmware/main/main.py"
+}
 }
