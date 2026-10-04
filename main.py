@@ -40,7 +40,7 @@ gps_lock = _thread.allocate_lock()
 MCU_VERSION_FILE = '/usr/mcu-version.dat'
 GIT_VERSION_URL = 'https://raw.githubusercontent.com/nayanakab22/Tbox-STM32-Firmware/main/version.json'
 # Add this near your MCU_VERSION_FILE definition
-EC_CURRENT_VERSION = "1.1"
+EC_CURRENT_VERSION = "1.2"
 EC_SCRIPT_NAME = '/usr/main.py'  # Must match the name of the script QuecPython boots from
 is_mcu_ota_active = False
 ota_ready_event = 0 # 0 = waiting, 1 = ready, -1 = fail
